@@ -5,7 +5,9 @@ from langchain_core.output_parsers import JsonOutputParser
 import uuid
 import chromadb
 import pandas as pd
+import json
 
+# Initialize the ChatGroq LLM
 llm = ChatGroq(
     model='llama3-8b-8192',
     temperature=0,
@@ -24,8 +26,7 @@ prompt_extract = PromptTemplate.from_template(
     ###INSTRUCTION
     The scraped text is from the career's page of a website.
     Your job is to extract the job postings and return them in a JSON format containing the following keys: 'role', 'experience', 'skills' and 'description'.
-    Only return the valid JSON
-    ##VALID JSON (NO PREAMBLE):
+    Only return the valid JSON (NO PREAMBLE, NO EXTRA TEXT):
     """
 )
 
@@ -33,33 +34,46 @@ prompt_extract = PromptTemplate.from_template(
 chainextract = prompt_extract | llm
 r = chainextract.invoke(input={'pagedata': pagedata})
 
-# Parse the output from LLM
-json_parser = JsonOutputParser()
-json_r = json_parser.parse(r.content)
+# Clean up LLM response to extract JSON portion only
+try:
+    json_data = r.content.strip().split("```")[1]  # Extract JSON from the response
+    json_r = json.loads(json_data)  # Parse JSON
+except (IndexError, json.JSONDecodeError):
+    raise ValueError("Failed to extract job posting details from LLM output.")
 
-# Assuming 'json_r' is a list containing one or more job postings
-if isinstance(json_r, list) and len(json_r) > 0:
-    job_posting = json_r[0]  # Access the first job posting (a dictionary)
-    print(job_posting)  # Now you have just the dictionary for the first job posting
+# Print the extracted job posting for confirmation
+print(json_r)
 
+# Assuming 'json_r' is a valid job posting (a dictionary)
+job_posting = json_r
+
+# Initialize the ChromaDB client and collection
 client = chromadb.PersistentClient('vectorstore')
 collection = client.get_or_create_collection(name='portfolio')
 
+# Load the portfolio CSV file
 df = pd.read_csv("my_portfolio.csv")
 
+# Add portfolio data to the ChromaDB collection if it's not already present
 if not collection.count():
     for _, row in df.iterrows():
-        collection.add(documents=row["Techstack"],
-                       metadatas={"links": row["Links"]},
-                       ids=[str(uuid.uuid4())])
+        collection.add(
+            documents=row["Techstack"],
+            metadatas={"links": row["Links"]},
+            ids=[str(uuid.uuid4())]
+        )
 
 # Extract 'skills' from the job_posting
 skills = job_posting.get('skills', '')
 
 # Query the collection using the extracted skills
-links = collection.query(query_texts=[skills], n_results=2).get('metadatas', [])
+if skills:
+    links = collection.query(query_texts=[', '.join(skills)], n_results=2).get('metadatas', [])
+else:
+    print("No skills found in job posting, cannot query portfolio links.")
+    links = []
 
-# Now use 'job_posting' instead of 'job' for email generation
+# Now use 'job_posting' for email generation
 prompt_email = PromptTemplate.from_template(
     """
     ### JOB DESCRIPTION:
@@ -80,4 +94,5 @@ r = chain_email.invoke({
 })
 
 # Print the email content
+print("Generated Email:")
 print(r.content)
